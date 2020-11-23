@@ -1,0 +1,157 @@
+- hosts: all
+  user: cloud_user
+  become: yes
+  tasks:
+
+   - name: install yum-utils
+     yum:
+        name: yum-utils
+        state: present
+     when: ansible_distribution_major_version > '7'
+
+   - name: Add repository
+     yum_repository:
+       name: docker repo
+       description: docker repo
+       baseurl: https://download.docker.com/linux/centos/docker-ce
+     when: ansible_distribution_major_version > '7'
+
+   - name: install Docker
+     yum:
+       name:
+        - docker-ce
+        - docker-ce-cli
+        - containerd.io
+       state: present
+     when: ansible_distribution_major_version > '7'
+
+   - name: install Docker
+     yum:
+       name: docker
+       state: present
+     when: ansible_distribution_major_version < '8'
+
+   - name: Disable swap
+     command: swapoff -a
+     when: ansible_swaptotal_mb > 0
+
+   - name: start Docker
+     service:
+       name: docker
+       state: restarted
+       enabled: yes
+
+   - name: disable SELinux
+     command: setenforce 0
+     ignore_errors: yes
+
+   - name: disable SELinux on reboot
+     selinux:
+       state: disabled
+
+   - name: ensure net.bridge.bridge-nf-call-ip6tables is set to 1
+     sysctl:
+      name: net.bridge.bridge-nf-call-ip6tables
+      value: 1
+      state: present
+
+   - name: ensure net.bridge.bridge-nf-call-iptables is set to 1
+     sysctl:
+      name: net.bridge.bridge-nf-call-iptables
+      value: 1
+      state: present
+
+   - name: add Kubernetes' YUM repository
+     yum_repository:
+      name: Kubernetes
+      description: Kubernetes YUM repository
+      baseurl: https://packages.cloud.google.com/yum/repos/kubernetes-el7-x86_64
+      gpgkey: https://packages.cloud.google.com/yum/doc/yum-key.gpg https://packages.cloud.google.com/yum/doc/rpm-package-key.gpg
+      gpgcheck: yes
+
+   - name: install kubelet
+     yum:
+        name: kubelet-1.14.0
+        state: present
+
+   - name: install kubeadm
+     yum:
+        name: kubeadm-1.14.0
+        state: present
+
+   - name: start kubelet
+     service:
+       name: kubelet
+       enabled: yes
+       state: restarted
+
+   # - import_tasks: master-playbook.yml
+   # - import_tasks: node-playbook.yml
+
+###############################
+
+- hosts: master
+  user: cloud_user
+  become: yes
+  vars:
+    docker_user: cloud_user
+  tasks:
+
+   - name: install kubectl
+     yum:
+        name: kubectl-1.14.0
+        state: present
+        allow_downgrade: yes
+
+   - name: initialize the cluster
+     shell: kubeadm init --pod-network-cidr=172.31.0.0/16 --ignore-preflight-errors=all >> cluster_initialized.txt
+     args:
+       chdir: $HOME
+       creates: cluster_initialized.txt
+
+   - name: create .kube directory
+     become: yes
+     become_user: "{{ docker_user }}"
+     file:
+       path: $HOME/.kube
+       state: directory
+       mode: 0755
+
+   - name: copy admin.conf to user's kube config
+     copy:
+       src: /etc/kubernetes/admin.conf
+       dest: /home/{{ docker_user }}/.kube/config
+       remote_src: yes
+       owner: "{{ docker_user }}"
+
+
+   - name: install Pod network
+     become: yes
+     become_user: "{{ docker_user }}"
+     shell: kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/a70459be0084506e4ec919aa1c114638878db11b/Documentation/kube-flannel.yml >> pod_network_setup.txt
+     args:
+       chdir: $HOME
+       creates: pod_network_setup.txt
+
+   - name: get join command
+     shell: kubeadm token create --print-join-command
+     register: join_command
+
+   - name: Copy join command to local file
+     become: no
+     local_action: copy content="{{ join_command.stdout_lines[0] }}" dest="./join-command"
+
+###############################
+
+- hosts: node
+  user: cloud_user
+  become: yes
+  tasks:
+
+   - name: Copy the join command to server location
+     copy: src=join-command dest=/tmp/join-command.sh mode=0777
+
+   - name: Join the node to cluster
+     shell: |
+      join_cluster=`cat /tmp/join-command.sh`
+      $join_cluster --ignore-preflight-errors=all

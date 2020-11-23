@@ -1,0 +1,1 @@
+kubeadm join 172.31.42.135:6443 --token l7apvx.np6r3gg6r9m71z7e     --discovery-token-ca-cert-hash sha256:580cdb57e4a3aa75eed88e449a9f242f6d2a617d99315e23f9fedc81b5b0b7aa 
